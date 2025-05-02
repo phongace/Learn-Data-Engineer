@@ -1,0 +1,23 @@
+id: basic-shell
+namespace: data-engineer
+description: "Basic workflow with Shell tasks and dependencies"
+
+tasks:
+  - id: main
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: prepare_data
+        type: io.kestra.plugin.scripts.shell.Commands
+        commands:
+          - echo "Preparing data..."
+
+      - id: process_data
+        type: io.kestra.plugin.scripts.shell.Commands
+        commands:
+          - echo "Processing data..."
+
+      - id: analyze_data
+        type: io.kestra.plugin.scripts.shell.Commands
+        commands:
+          - echo "Analyzing data..."
+          - echo "Analysis completed successfully!"

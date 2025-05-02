@@ -1,0 +1,419 @@
+id: api_to_csv_with_error_handling
+namespace: data-engineer
+description: "Workflow để lấy dữ liệu từ API và lưu thành CSV với xử lý lỗi toàn diện"
+
+errors:
+  - id: error_notification
+    type: io.kestra.plugin.core.log.Log
+    message: "Lỗi xảy ra trong workflow API_TO_CSV"
+
+  - id: error_notification_email
+    type: io.kestra.plugin.notifications.opsgenie.OpsgenieExecution
+    url: "{{ inputs.slack_webhook_url }}"
+    message: "Lỗi xảy ra trong workflow API_TO_CSV"
+    runIf: "{{ execution.state == 'FAILED' }}"
+
+inputs:
+  - id: api_url
+    type: STRING
+    defaults: https://tama.meme/api/tokenList?sortDirection=desc&sortBy=createdAt&page=1&limit=100&isMigratedToDex=false
+    required: true
+  - id: retry_count
+    type: INT
+    defaults: 3
+    required: true
+  - id: slack_webhook_url
+    type: STRING
+    required: false
+
+tasks:
+  - id: fetch_api_data
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: python:3.9
+    beforeCommands:
+      - pip install requests pandas
+      - mkdir -p /data/output
+      - chmod -R 777 /data
+    inputFiles:
+      api_handler.py: |
+        import requests
+        import pandas as pd
+        import os
+        import json
+        from datetime import datetime
+        import sys
+        import traceback
+        import time
+
+        def fetch_and_save_data(
+            api_url,
+            output_dir="/data/output",
+            file_prefix="api_data",
+            retry_count=3,
+            retry_delay=5
+        ):
+            """
+            Fetch data from API and save to CSV with comprehensive error handling
+            """
+            error_log = []
+            success = False
+            data = None
+            
+            # Create output for error tracking
+            error_output = {
+                "status": "unknown",
+                "message": "",
+                "details": [],
+                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            try:
+                # Implement retry mechanism with exponential backoff
+                for attempt in range(retry_count):
+                    current_delay = retry_delay * (2 ** attempt)
+                    try:
+                        print(f"Attempt {attempt + 1} of {retry_count}: Fetching data from {api_url}")
+                        
+                        # Set reasonable timeout and add headers
+                        headers = {'User-Agent': 'Kestra-Workflow/1.0'}
+                        response = requests.get(api_url, timeout=30, headers=headers)
+                        
+                        # Handle HTTP errors with specific messaging
+                        response.raise_for_status()
+                        
+                        # Attempt to parse as JSON with error handling
+                        try:
+                            data = response.json()
+                            success = True
+                            break
+                        except json.JSONDecodeError as je:
+                            error_msg = f"API response not valid JSON: {str(je)}"
+                            error_log.append(error_msg)
+                            error_output["details"].append({"attempt": attempt + 1, "error": error_msg})
+                            raise ValueError(error_msg)
+                            
+                    except requests.exceptions.ConnectionError as ce:
+                        error_msg = f"Connection error on attempt {attempt + 1}: {str(ce)}"
+                        print(error_msg)
+                        error_log.append(error_msg)
+                        error_output["details"].append({"attempt": attempt + 1, "error": error_msg})
+                    
+                    except requests.exceptions.Timeout as te:
+                        error_msg = f"Timeout error on attempt {attempt + 1}: {str(te)}"
+                        print(error_msg)
+                        error_log.append(error_msg)
+                        error_output["details"].append({"attempt": attempt + 1, "error": error_msg})
+                    
+                    except requests.exceptions.HTTPError as he:
+                        status_code = he.response.status_code if he.response else "unknown"
+                        error_msg = f"HTTP error {status_code} on attempt {attempt + 1}: {str(he)}"
+                        print(error_msg)
+                        error_log.append(error_msg)
+                        error_output["details"].append({"attempt": attempt + 1, "error": error_msg})
+                        
+                        # Don't retry on client errors (4xx) except for 429 Too Many Requests
+                        if status_code < 500 and status_code != 429:
+                            error_output["status"] = "failed"
+                            error_output["message"] = f"Client error {status_code}, not retrying"
+                            break
+                    
+                    except requests.RequestException as e:
+                        error_msg = f"Request error on attempt {attempt + 1}: {str(e)}"
+                        print(error_msg)
+                        error_log.append(error_msg)
+                        error_output["details"].append({"attempt": attempt + 1, "error": error_msg})
+                    
+                    # Don't wait after last attempt
+                    if attempt < retry_count - 1:
+                        print(f"Retrying in {current_delay} seconds...")
+                        time.sleep(current_delay)
+                
+                # Handle case where all retries failed
+                if not success:
+                    error_output["status"] = "failed"
+                    error_output["message"] = f"All {retry_count} attempts failed"
+                    error_msg = f"All {retry_count} attempts failed. Errors: {'; '.join(error_log)}"
+                    
+                    # Write error log to file
+                    error_log_file = os.path.join(output_dir, f"error_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+                    with open(error_log_file, 'w') as f:
+                        json.dump(error_output, f, indent=2)
+                    
+                    raise Exception(error_msg)
+                
+                # Validate data structure
+                if not data:
+                    error_output["status"] = "failed"
+                    error_output["message"] = "No data received from API"
+                    raise ValueError("No data received from API")
+                
+                if not isinstance(data, list) and not isinstance(data, dict):
+                    error_output["status"] = "failed" 
+                    error_output["message"] = "Invalid data format received from API"
+                    raise ValueError("Invalid data format received from API - expected list or dict")
+                
+                # Handle both list and dict responses
+                if isinstance(data, dict):
+                    # If it's a dict with results/data/items key, use that
+                    for key in ['results', 'data', 'items', 'records']:
+                        if key in data and isinstance(data[key], list):
+                            data = data[key]
+                            break
+                    # Otherwise, wrap single dict in a list
+                    if isinstance(data, dict):
+                        data = [data]
+                
+                # Convert to DataFrame with error handling
+                try:
+                    df = pd.DataFrame(data)
+                    
+                    if df.empty:
+                        error_output["status"] = "failed"
+                        error_output["message"] = "Empty dataframe created from API data"
+                        raise ValueError("No data received from API - empty dataframe")
+                        
+                    print(f"Retrieved {len(df)} records with {len(df.columns)} columns")
+                    print(f"Columns: {', '.join(df.columns.tolist())}")
+                    
+                    # Check for required columns if applicable
+                    # required_columns = ["id", "title", "body"]
+                    # missing_columns = [col for col in required_columns if col not in df.columns]
+                    # if missing_columns:
+                    #     error_output["status"] = "warning"
+                    #     error_output["message"] = f"Missing required columns: {', '.join(missing_columns)}"
+                    #     print(f"Warning: Missing required columns: {', '.join(missing_columns)}")
+                    
+                except Exception as e:
+                    error_output["status"] = "failed"
+                    error_output["message"] = f"Error creating DataFrame: {str(e)}"
+                    raise ValueError(f"Error processing data: {str(e)}")
+                
+                # Save with error handling
+                try:
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    output_file = os.path.join(output_dir, f"{file_prefix}_{timestamp}.csv")
+                    
+                    # Handle potential encoding issues
+                    df.to_csv(output_file, index=False, encoding='utf-8-sig')
+                    
+                    # Set permissions
+                    os.chmod(output_file, 0o666)
+                    print(f"Data saved to {output_file}")
+                    
+                    # Verify file was created and has content
+                    if not os.path.exists(output_file):
+                        error_output["status"] = "failed"
+                        error_output["message"] = f"Failed to create output file: {output_file}"
+                        raise IOError(f"Failed to create output file: {output_file}")
+                        
+                    if os.path.getsize(output_file) == 0:
+                        error_output["status"] = "failed"
+                        error_output["message"] = f"Output file created but is empty: {output_file}"
+                        raise IOError(f"Output file created but is empty: {output_file}")
+                    
+                    # Create success status file with metadata
+                    success_metadata = {
+                        "status": "success",
+                        "filename": output_file,
+                        "rows": len(df),
+                        "columns": len(df.columns),
+                        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        "source": api_url
+                    }
+                    
+                    metadata_file = os.path.join(output_dir, f"{file_prefix}_{timestamp}_metadata.json")
+                    with open(metadata_file, 'w') as f:
+                        json.dump(success_metadata, f, indent=2)
+                    
+                    return output_file, metadata_file
+                    
+                except Exception as e:
+                    error_output["status"] = "failed"
+                    error_output["message"] = f"Error saving data: {str(e)}"
+                    
+                    # Write error log to file
+                    error_log_file = os.path.join(output_dir, f"error_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+                    with open(error_log_file, 'w') as f:
+                        json.dump(error_output, f, indent=2)
+                        
+                    raise IOError(f"Error saving data: {str(e)}")
+                    
+            except Exception as e:
+                error_output["status"] = "failed"
+                if not error_output["message"]:
+                    error_output["message"] = str(e)
+                
+                # Write final error log
+                error_log_file = os.path.join(output_dir, f"error_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+                with open(error_log_file, 'w') as f:
+                    json.dump(error_output, f, indent=2)
+                
+                print(f"Error in fetch_and_save_data: {str(e)}")
+                print(f"Traceback: {traceback.format_exc()}")
+                
+                # Return error log file for downstream tasks
+                return None, error_log_file
+
+    script: |
+      try:
+          from api_handler import fetch_and_save_data
+          import os
+          import json
+          
+          # Execute the main function with error handling
+          csv_file, metadata_file = fetch_and_save_data(
+              api_url="{{ inputs.api_url }}",
+              output_dir="/data/output",
+              file_prefix="api_data",
+              retry_count={{ inputs.retry_count }},
+              retry_delay=5
+          )
+          
+          if csv_file is not None:
+              # Success path
+              print(f"DEBUG: CSV File path is: {csv_file}")
+              print(f"DEBUG: Metadata file path is: {metadata_file}")
+              print(f"DEBUG: Files exist: CSV={os.path.exists(csv_file)}, Metadata={os.path.exists(metadata_file)}")
+              
+              # Load metadata for output
+              with open(metadata_file, 'r') as f:
+                  metadata = json.load(f)
+              
+              # Use the standard Kestra output format for both file and direct output variable
+              print(f"::file::{csv_file}")
+              print(f"::output::csv_file={csv_file}")
+              print(f"::output::status=success")
+              print(f"::output::record_count={metadata['rows']}")
+              print(f"::output::metadata_file={metadata_file}")
+          else:
+              # Failure path
+              print(f"DEBUG: CSV creation failed, error log at: {metadata_file}")
+              
+              # Load error details for output
+              with open(metadata_file, 'r') as f:
+                  error_data = json.load(f)
+              
+              print(f"::file::{metadata_file}")
+              print(f"::output::status=failed")
+              print(f"::output::error_log={metadata_file}")
+              print(f"::output::error_message={error_data['message']}")
+              
+              # Fail the task with informative message
+              raise Exception(f"Data extraction failed: {error_data['message']}")
+          
+      except Exception as e:
+          print(f"Critical error occurred in workflow task: {str(e)}")
+          print(f"::output::status=failed")
+          print(f"::output::error_message={str(e)}")
+          raise e
+
+  - id: validate_output
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: python:3.9
+    beforeCommands:
+      - pip install pandas
+      - mkdir -p /data/output
+      - chmod -R 777 /data
+    runIf: "{{ execution.state == 'RUNNING' or execution.state == 'SUCCESS' }}"
+    script: |
+      import pandas as pd
+      import os
+      import json
+      import sys
+      import glob
+
+      try:
+          # Find the most recent CSV file in the output directory
+          output_dir = "/data/output"
+          csv_files = glob.glob(f"{output_dir}/api_data_*.csv")
+          
+          if not csv_files:
+              print("No CSV files found in output directory - previous task may have failed")
+              print(f"::output::status=skipped")
+              sys.exit(0)
+          
+          # Sort by creation time (newest first)
+          csv_files.sort(key=lambda x: os.path.getctime(x), reverse=True)
+          csv_file = csv_files[0]
+          
+          print(f"Found most recent CSV file: {csv_file}")
+          
+          # Ensure the file exists
+          if not os.path.exists(csv_file):
+              raise FileNotFoundError(f"CSV file not found at {csv_file}")
+          
+          # Read and validate the CSV with error handling
+          try:
+              df = pd.read_csv(csv_file)
+          except Exception as e:
+              raise ValueError(f"Failed to read CSV file: {str(e)}")
+          
+          # Perform validations
+          validations = {
+              "row_count": str(len(df)),
+              "column_count": str(len(df.columns)),
+              "has_required_columns": str(all(col in df.columns for col in ["id", "title", "body"])),
+              "no_empty_required": str(all(col in df.columns for col in ["id", "title", "body"]) and 
+                                     not df[["id", "title", "body"]].isnull().any().any())
+          }
+          
+          # Data quality checks
+          data_quality = {
+              "unique_ids": str(df["id"].nunique() == len(df) if "id" in df.columns else False),
+              "no_duplicates": str(not df.duplicated().any()),
+              "valid_types": str(all(df[col].dtype.name != 'object' for col in df.columns if col in ['id', 'userId']))
+          }
+          
+          # Combine all validation results
+          all_validations = {**validations, **data_quality}
+          
+          # Determine status
+          validation_passed = all(val == "True" for val in [
+              validations["has_required_columns"], 
+              validations["no_empty_required"],
+              data_quality["no_duplicates"]
+          ])
+          
+          status = "valid" if validation_passed else "invalid"
+          
+          print(f"Validation results: {all_validations}")
+          print(f"Row count: {validations['row_count']}")
+          
+          # Save validation results to file for reference
+          validation_file = os.path.join(output_dir, "validation_results.json")
+          with open(validation_file, 'w') as f:
+              json.dump({
+                  "status": status,
+                  "validations": all_validations,
+                  "filename": csv_file,
+                  "row_count": validations["row_count"]
+              }, f, indent=2)
+          
+          # Output in Kestra's format
+          print(f"::file::{validation_file}")
+          print(f"::output::validation_file={validation_file}")
+          print(f"::output::status={status}")
+          print(f"::output::row_count={validations['row_count']}")
+          
+          if status == "invalid":
+              raise ValueError("Data validation failed - see validation_results for details")
+              
+      except Exception as e:
+          print(f"Validation error: {str(e)}")
+          print(f"::output::status=failed")
+          print(f"::output::error_message={str(e)}")
+          sys.exit(1)
+
+  - id: notify_completion
+    type: io.kestra.plugin.core.log.Log
+    message: "Workflow completed successfully."
+    runIf: "{{ execution.state == 'RUNNING' or execution.state == 'SUCCESS' }}"
+
+  - id: handle_invalid_data
+    type: io.kestra.plugin.core.log.Log
+    message: "Data validation failed! Please check validation results."
+    runIf: "{{ execution.state == 'RUNNING' }}"

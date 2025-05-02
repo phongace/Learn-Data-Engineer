@@ -1,0 +1,45 @@
+id: scheduled_workflow
+namespace: data-engineer
+description: "Workflow with time-based triggers for data processing"
+
+triggers:
+  - id: every_morning
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 8 * * *" # Chạy hàng ngày lúc 8:00 sáng
+    disabled: true # Cho phép trigger hoạt động
+
+  - id: weekly_backup
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 0 * * SUN" # Chạy mỗi Chủ nhật lúc 00:00
+    disabled: true # Cho phép trigger hoạt động
+
+  - id: every_minute
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "*/1 * * * *" # Chạy mỗi phút
+    backfill:
+      start: "2024-04-29T00:00:00Z" # Thời gian bắt đầu
+    disabled: true # Cho phép trigger hoạt động
+
+tasks:
+  - id: main
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: log_trigger_info
+        type: io.kestra.plugin.core.log.Log
+        message: "Workflow started"
+
+      - id: check_memory
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: ubuntu:latest
+        commands:
+          - "echo === System Status Check ==="
+          - "echo Current Time: $(date)"
+          - "echo Next Run: $(date -d '+1 minute')"
+          - "echo Memory Usage: $(free -h)"
+          - "echo ==========================="
+
+      - id: notify_status
+        type: io.kestra.plugin.core.log.Log
+        message: "Check completed"

@@ -1,0 +1,33 @@
+id: check_data_exists
+namespace: data-engineer
+description: "Workflow to check data existence and send notifications"
+
+triggers:
+  - id: every_morning
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 9 * * *" # Chạy hàng ngày lúc 9:00 sáng
+    disabled: true # Cho phép trigger hoạt động
+
+tasks:
+  - id: main
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: check_input_folder
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: ubuntu:latest
+        commands:
+          - "ls -l /data/input || echo Input folder does not exist"
+
+      - id: check_files
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: ubuntu:latest
+        commands:
+          - "ls -l /data/input/data*.csv || echo No data files found"
+
+      - id: notify_status
+        type: io.kestra.plugin.core.log.Log
+        message: "Data check completed"

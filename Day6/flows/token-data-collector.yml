@@ -1,0 +1,370 @@
+id: token_data_collector
+namespace: data-engineer
+description: "Scheduled workflow to collect token data from API every minute"
+
+tasks:
+  - id: main
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: prepare_environment
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: ubuntu:latest
+          networkMode: "host" # Use host networking to access localhost services
+        commands:
+          - mkdir -p /data/output
+          - chmod -R 777 /data
+          - echo "Directory structure created"
+
+      - id: fetch_token_data
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: python:3.9
+          networkMode: "host" # Use host networking to access localhost services
+        beforeCommands:
+          - pip install requests pandas sqlalchemy psycopg2-binary
+          - mkdir -p /data/output
+          - chmod -R 777 /data
+        inputFiles:
+          db_handler.py: |
+            import pandas as pd
+            import sqlalchemy as sa
+            import os
+            import json
+            import requests
+            import traceback
+            from datetime import datetime
+            import time
+            from sqlalchemy import Table, Column, Integer, String, Float, DateTime, MetaData, create_engine, Text
+            from sqlalchemy.dialects.postgresql import insert
+
+
+            def create_token_table(engine):
+                """Create token table if it doesn't exist"""
+                metadata = MetaData()
+                
+                # Define the token table with fields matching the API response
+                tokens = Table(
+                    'tokens', metadata,
+                    Column('id', Integer, primary_key=True, autoincrement=True),
+                    Column('name', String),
+                    Column('symbol', String),  # from "ticker" in the API
+                    Column('address', String, unique=True),
+                    Column('chain', String),
+                    Column('description', Text),  # New field from API
+                    Column('image_url', String),  # New field from API
+                    Column('price', Float),  # from "initPrice" in the API
+                    Column('market_cap', Float),  # from "lastMcap" in the API
+                    Column('volume_24h', Float),  # from "totalVolume" in the API
+                    Column('holders_count', Integer),  # from "totalHolders" in the API
+                    Column('top10_hold_percent', Float),  # New field from API
+                    Column('created_at', DateTime),
+                    Column('last_buy', DateTime),  # New field from API
+                    Column('fetch_time', DateTime),
+                    Column('is_migrated_to_dex', sa.Boolean),
+                )
+                
+                # Create the table if it doesn't exist
+                metadata.create_all(engine)
+                
+                return tokens
+
+
+            def fetch_and_save_to_db(
+                api_url="https://tama.meme/api/tokenList?sortDirection=desc&sortBy=createdAt&page=1&limit=100&isMigratedToDex=false",
+                db_url="postgresql://kestra:k3str4@host.docker.internal:5432/kestra",  # Use host.docker.internal to connect from Docker to host
+                retry_count=3,
+                retry_delay=5,
+                output_dir="/data/output"
+            ):
+                """
+                Fetch data from API and save to PostgreSQL database
+                
+                Args:
+                    api_url (str): URL of the API endpoint
+                    db_url (str): Database connection URL
+                    retry_count (int): Number of retry attempts
+                    retry_delay (int): Delay between retries in seconds
+                    output_dir (str): Directory to save CSV backup
+                    
+                Returns:
+                    dict: Operation result metadata
+                """
+                error_log = []
+                success = False
+                data = None
+                fetch_time = datetime.now()
+                
+                # Create output for tracking
+                result = {
+                    "status": "unknown",
+                    "message": "",
+                    "details": [],
+                    "timestamp": fetch_time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "record_count": 0,
+                    "csv_path": ""
+                }
+                
+                try:
+                    # Implement retry mechanism with exponential backoff
+                    for attempt in range(retry_count):
+                        current_delay = retry_delay * (2 ** attempt)
+                        try:
+                            print(f"Attempt {attempt + 1} of {retry_count}: Fetching data from {api_url}")
+                            
+                            # Set reasonable timeout and add headers
+                            headers = {'User-Agent': 'Kestra-Workflow/1.0'}
+                            response = requests.get(api_url, timeout=30, headers=headers)
+                            
+                            # Handle HTTP errors with specific messaging
+                            response.raise_for_status()
+                            
+                            # Attempt to parse as JSON
+                            data = response.json()
+                            success = True
+                            break
+                            
+                        except Exception as e:
+                            error_msg = f"Error on attempt {attempt + 1}: {str(e)}"
+                            print(error_msg)
+                            error_log.append(error_msg)
+                            result["details"].append({"attempt": attempt + 1, "error": error_msg})
+                            
+                            # Don't wait after last attempt
+                            if attempt < retry_count - 1:
+                                print(f"Retrying in {current_delay} seconds...")
+                                time.sleep(current_delay)
+                    
+                    # Handle case where all retries failed
+                    if not success:
+                        result["status"] = "failed"
+                        result["message"] = f"All {retry_count} attempts failed"
+                        raise Exception(f"All {retry_count} attempts failed. Errors: {'; '.join(error_log)}")
+                    
+                    # Validate and process data
+                    if not data:
+                        result["status"] = "failed"
+                        result["message"] = "No data received from API"
+                        raise ValueError("No data received from API")
+                        
+                    # Extract data from the response - tokens are at the root level
+                    tokens_data = data
+                    if isinstance(data, dict) and 'items' in data:
+                        tokens_data = data['items']
+                    
+                    # Convert to DataFrame
+                    df = pd.DataFrame(tokens_data)
+                    
+                    if df.empty:
+                        result["status"] = "warning"
+                        result["message"] = "Empty dataset received from API"
+                        print("Warning: Empty dataset received from API")
+                        return result
+                        
+                    print(f"Retrieved {len(df)} records with {len(df.columns)} columns")
+                    
+                    # Create backup CSV file
+                    os.makedirs(output_dir, exist_ok=True)
+                    csv_filename = os.path.join(output_dir, f"token_data_{fetch_time.strftime('%Y%m%d_%H%M%S')}.csv")
+                    df.to_csv(csv_filename, index=False)
+                    print(f"Data backup saved to {csv_filename}")
+                    result["csv_path"] = csv_filename
+                    
+                    # Convert timestamp fields from milliseconds to datetime
+                    timestamp_cols = ['createdAt', 'lastBuy']
+                    for col in timestamp_cols:
+                        if col in df.columns:
+                            # Convert milliseconds to datetime, handling zeros
+                            df[col] = pd.to_datetime(df[col], unit='ms', errors='coerce')
+                    
+                    # Map API fields to database columns based on the actual API response
+                    df = df.rename(columns={
+                        'name': 'name',
+                        'address': 'address',
+                        'ticker': 'symbol',
+                        'description': 'description',
+                        'imageUrl': 'image_url',
+                        'initPrice': 'price',
+                        'lastMcap': 'market_cap',
+                        'totalVolume': 'volume_24h',
+                        'totalHolders': 'holders_count',
+                        'top10HoldPercent': 'top10_hold_percent',
+                        'createdAt': 'created_at',
+                        'lastBuy': 'last_buy',
+                        'isMigratedToDex': 'is_migrated_to_dex'
+                    })
+                    
+                    # Add fetch timestamp
+                    df['fetch_time'] = fetch_time
+                    
+                    try:
+                        # Create DB connection
+                        print(f"Connecting to database: {db_url}")
+                        engine = create_engine(db_url)
+                        
+                        # Create table if not exists
+                        tokens_table = create_token_table(engine)
+                        
+                        # Prepare data for PostgreSQL
+                        records = df.to_dict(orient='records')
+                        result["record_count"] = len(records)
+                        
+                        # Save to database using upsert (insert or update)
+                        with engine.begin() as conn:
+                            for record in records:
+                                # Clean up any None values
+                                cleaned_record = {k: v for k, v in record.items() if v is not None}
+                                
+                                # Use the PostgreSQL-specific upsert
+                                stmt = insert(tokens_table).values(**cleaned_record)
+                                
+                                # On conflict with unique address, update values
+                                update_dict = {
+                                    'name': stmt.excluded.name,
+                                    'symbol': stmt.excluded.symbol,
+                                    'description': stmt.excluded.description,
+                                    'image_url': stmt.excluded.image_url,
+                                    'price': stmt.excluded.price,
+                                    'market_cap': stmt.excluded.market_cap,
+                                    'volume_24h': stmt.excluded.volume_24h,
+                                    'holders_count': stmt.excluded.holders_count,
+                                    'top10_hold_percent': stmt.excluded.top10_hold_percent,
+                                    'last_buy': stmt.excluded.last_buy,
+                                    'fetch_time': stmt.excluded.fetch_time,
+                                    'is_migrated_to_dex': stmt.excluded.is_migrated_to_dex
+                                }
+                                
+                                update_stmt = stmt.on_conflict_do_update(
+                                    index_elements=['address'],
+                                    set_=update_dict
+                                )
+                                
+                                conn.execute(update_stmt)
+                            
+                        print(f"Successfully saved {len(records)} records to database")
+                        
+                        # Set success status
+                        result["status"] = "success"
+                        result["message"] = f"Successfully saved {len(records)} records to database"
+                        
+                    except Exception as db_error:
+                        result["status"] = "warning"
+                        result["message"] = f"Database error: {str(db_error)}, but CSV backup was created"
+                        print(f"Database error: {str(db_error)}")
+                        print(f"CSV backup was created at {csv_filename}")
+                    
+                    return result
+                    
+                except Exception as e:
+                    result["status"] = "failed"
+                    if not result["message"]:
+                        result["message"] = str(e)
+                    
+                    print(f"Error in fetch_and_save_to_db: {str(e)}")
+                    print(f"Traceback: {traceback.format_exc()}")
+                    
+                    return result
+        script: |
+          try:
+              from db_handler import fetch_and_save_to_db
+              import json
+              from datetime import datetime
+              
+              # Log the start of execution
+              print(f"Started token data collection at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+              
+              # Call the function to fetch and save data
+              result = fetch_and_save_to_db(
+                  api_url="https://tama.meme/api/tokenList?sortDirection=desc&sortBy=createdAt&page=1&limit=100&isMigratedToDex=false",
+                  db_url="postgresql://kestra:k3str4@host.docker.internal:5432/kestra",  # Use host.docker.internal to connect from Docker to host
+                  retry_count=3,
+                  retry_delay=5,
+                  output_dir="/data/output"
+              )
+              
+              # Output the result as JSON for Kestra to capture
+              print(json.dumps(result, default=str))
+              
+              # Set output variables
+              outputs = {
+                  "status": result["status"],
+                  "message": result["message"],
+                  "record_count": result["record_count"],
+                  "timestamp": result["timestamp"],
+                  "csv_path": result["csv_path"]
+              }
+              
+          except Exception as e:
+              print(f"Error occurred: {str(e)}")
+              raise e
+
+      - id: verify_output
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: ubuntu:latest
+          networkMode: "host" # Use host networking to access localhost services
+        commands:
+          - mkdir -p /data/output
+          - echo "=== Directory Structure ==="
+          - ls -la /data
+          - echo "=== Output Directory Contents ==="
+          - ls -la /data/output
+          - echo "=== Latest CSV Files ==="
+          - find /data/output -name "*.csv" -type f -ls
+
+      - id: check_db_connection
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: python:3.9
+          networkMode: "host" # Use host networking to access localhost services
+        beforeCommands:
+          - pip install sqlalchemy psycopg2-binary
+        script: |
+          from sqlalchemy import create_engine, text
+          import sys
+
+          try:
+              # Connect to database
+              db_url = "postgresql://kestra:k3str4@host.docker.internal:5432/kestra"
+              print(f"Connecting to database: {db_url}")
+              
+              engine = create_engine(db_url)
+              
+              # Check connection
+              with engine.connect() as conn:
+                  # Check if table exists
+                  table_exists = conn.execute(
+                      text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'tokens')")
+                  ).scalar()
+                  
+                  # Count records
+                  if table_exists:
+                      record_count = conn.execute(text("SELECT COUNT(*) FROM tokens")).scalar()
+                      print(f"Found {record_count} records in tokens table")
+                  else:
+                      print("Tokens table does not exist!")
+              
+              print("Database check completed successfully")
+
+          except Exception as e:
+              print(f"Database check failed: {e}")
+              sys.exit(1)
+
+      - id: notify_result
+        type: io.kestra.plugin.core.log.Log
+        message: "Token data collection completed successfully"
+
+triggers:
+  - id: schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "*/30 * * * *" # Run every minute
+    disabled: false
+
+labels:
+  workflow_type: data-collection
+  data_source: tama.meme
+  owner: data-engineering-team

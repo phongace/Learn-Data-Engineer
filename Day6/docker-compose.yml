@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: kestra
+      POSTGRES_PASSWORD: k3str4
+      POSTGRES_DB: kestra
+    ports:
+      - "5432:5432" # Expose PostgreSQL port to host machine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kestra"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kestra:
+    image: kestra/kestra:latest
+    command: server standalone --config /etc/config/application.yml
+    user: root
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./flows:/opt/kestra/flows
+      - ./application.yml:/etc/config/application.yml
+      - kestra_data:/app/storage
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp:/tmp
+
+volumes:
+  postgres_data:
+  kestra_data:

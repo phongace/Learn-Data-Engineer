@@ -1,0 +1,115 @@
+id: api_to_csv
+namespace: data-engineer
+description: "Workflow to fetch data from API and save to CSV"
+
+tasks:
+  - id: check_directories
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: ubuntu:latest
+    commands:
+      - mkdir -p /data/output
+      - chmod -R 777 /data
+      - echo "Directory structure created:"
+      - ls -la /data
+      - ls -la /data/output
+
+  - id: fetch_api_data
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: python:3.9
+    beforeCommands:
+      - pip install requests pandas
+      - mkdir -p /data/output
+      - chmod -R 777 /data
+    inputFiles:
+      api_handler.py: |
+        import requests
+        import pandas as pd
+        import os
+        from datetime import datetime
+
+        def create_output_dir(dir_path):
+            """Create output directory if it doesn't exist"""
+            os.makedirs(dir_path, exist_ok=True)
+            # Ensure directory is writable
+            os.chmod(dir_path, 0o777)
+
+        def generate_filename(prefix, directory):
+            """Generate unique filename with timestamp"""
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            return os.path.join(directory, f"{prefix}_{timestamp}.csv")
+
+        def fetch_and_save_data(
+            api_url="https://jsonplaceholder.typicode.com/posts",
+            output_dir="/data/output",
+            file_prefix="api_data"
+        ):
+            """
+            Fetch data from API and save to CSV
+            """
+            try:
+                # Ensure output directory exists and is writable
+                create_output_dir(output_dir)
+                
+                # Fetch data from API
+                print(f"Fetching data from {api_url}")
+                response = requests.get(api_url)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Convert to DataFrame
+                df = pd.DataFrame(data)
+                print(f"Retrieved {len(df)} records")
+                
+                # Generate filename and save
+                output_file = generate_filename(file_prefix, output_dir)
+                df.to_csv(output_file, index=False)
+                print(f"Data saved to {output_file}")
+                
+                # Ensure file is readable
+                os.chmod(output_file, 0o666)
+                
+                return output_file
+                
+            except Exception as e:
+                print(f"Error in fetch_and_save_data: {str(e)}")
+                raise
+    script: |
+      try:
+          from api_handler import fetch_and_save_data
+          
+          # Execute the main function and get the output file path
+          output_file = fetch_and_save_data(
+              api_url="https://jsonplaceholder.typicode.com/posts",
+              output_dir="/data/output",
+              file_prefix="api_data"
+          )
+          
+          # Store the filepath as output
+          outputs = {"csv_path": output_file}
+          print(f"Output path: {output_file}")
+          
+      except Exception as e:
+          print(f"Error occurred: {str(e)}")
+          raise e
+
+  - id: verify_data
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: ubuntu:latest
+    commands:
+      - mkdir -p /data/output
+      - echo "=== Directory Structure ==="
+      - ls -la /data
+      - echo "=== Output Directory Contents ==="
+      - ls -la /data/output
+      - echo "=== Latest CSV Files ==="
+      - find /data/output -name "*.csv" -type f -ls
+
+  - id: notify_completion
+    type: io.kestra.plugin.core.log.Log
+    message: "API data successfully fetched and saved to CSV in the workspace data/output directory"

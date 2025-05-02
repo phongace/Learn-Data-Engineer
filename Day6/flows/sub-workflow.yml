@@ -1,0 +1,24 @@
+id: sub_workflow
+namespace: data-engineer
+description: "Sub-workflow that processes a date input"
+
+inputs:
+  - id: date
+    type: STRING
+    required: true
+
+tasks:
+  - id: main
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: process_date
+        type: io.kestra.plugin.scripts.shell.Commands
+        commands:
+          - echo "Processing date ${KESTRA_INPUT_DATE}"
+          - echo "::{\\"outputs\\":{\\"processed_date\\":\\"processed_${KESTRA_INPUT_DATE}\\"}}"
+
+      - id: validate_date
+        type: io.kestra.plugin.scripts.shell.Commands
+        commands:
+          - echo "Validating processed date..."
+          - echo "Validation completed for ${KESTRA_INPUT_DATE}"

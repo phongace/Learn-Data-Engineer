@@ -1,0 +1,24 @@
+runtime: python39
+instance_class: F1
+
+entrypoint: python -m gunicorn -b :$PORT etl_api:app --timeout 120
+
+env_variables:
+  BUCKET_NAME: "bucket-test-unique-axle-457602-n6-20250429090602"
+  GOOGLE_APPLICATION_CREDENTIALS: "cgp-service-account-key.json"
+
+runtime_config:
+  python_version: 3.9
+
+automatic_scaling:
+  target_cpu_utilization: 0.65
+  min_instances: 1
+  max_instances: 10
+
+handlers:
+  - url: /.*
+    script: auto
+    secure: always
+
+includes:
+  - .env.yaml

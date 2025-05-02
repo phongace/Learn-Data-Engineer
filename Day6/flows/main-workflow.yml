@@ -1,0 +1,19 @@
+id: main_workflow
+namespace: data-engineer
+description: "Main workflow that triggers a sub-workflow"
+
+tasks:
+  - id: get_current_date
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: ubuntu:latest
+    commands:
+      - echo "::{\\"outputs\\":{\\"current_date\\":\\"$(date -I)\\"}}""
+
+  - id: trigger_sub_workflow
+    type: io.kestra.plugin.core.flow.Subflow
+    namespace: data-engineer
+    flowId: sub_workflow
+    inputs:
+      date: "{{ outputs.get_current_date.outputs.current_date }}"

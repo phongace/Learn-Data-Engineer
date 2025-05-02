@@ -1,0 +1,28 @@
+# Please add config/cgp-service-account-key.json to .gitignore
+config/cgp-service-account-key.json
+config/cgp-service-account-key.json
+
+# Google Cloud credentials
+*.json
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Environment variables
+.env
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+
+# node
+node_modules/
+package-lock.json
+yarn.lock

@@ -1,0 +1,41 @@
+id: basic-dependencies
+namespace: data-engineer
+description: "Basic ETL workflow with sequential tasks"
+
+tasks:
+  - id: main
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: extract_data
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: python:3.9-alpine
+        script: |
+          print("Extracting data...")
+          # Output data to share with other tasks
+          print("::{\"outputs\":{\"extracted_data\":\"some_data\"}}")
+
+      - id: transform_data
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: python:3.9-alpine
+        script: |
+          import os
+          print("Transforming data...")
+          extracted_data = os.environ.get("KESTRA_OUTPUTS_EXTRACT_DATA_EXTRACTED_DATA")
+          print(f"Received data: {extracted_data}")
+          print("::{\"outputs\":{\"transformed_data\":\"processed_data\"}}")
+
+      - id: load_data
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          image: python:3.9-alpine
+        script: |
+          import os
+          print("Loading data...")
+          transformed_data = os.environ.get("KESTRA_OUTPUTS_TRANSFORM_DATA_TRANSFORMED_DATA")
+          print(f"Received data: {transformed_data}")
+          print("Data loaded successfully!")
