@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: raw_data
+    database: postgres
+    schema: dbt_truongnx1
+    tables:
+      - name: customers
+      - name: orders

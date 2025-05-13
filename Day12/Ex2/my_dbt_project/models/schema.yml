@@ -1,0 +1,54 @@
+version: 2
+
+models:
+  - name: transformed_orders
+    description: "Model tổng hợp thông tin đơn hàng và khách hàng"
+    columns:
+      - name: customer_id
+        description: "Định danh khách hàng"
+        tests:
+          - unique
+          - not_null
+      - name: name
+        description: "Tên khách hàng"
+        tests:
+          - not_null
+      - name: email
+        description: "Email khách hàng"
+        tests:
+          - not_null
+          - unique
+      - name: total_spent
+        description: "Tổng chi tiêu của khách hàng"
+        tests:
+          - not_null
+          - positive_values
+      - name: order_count
+        description: "Số lượng đơn hàng"
+        tests:
+          - not_null
+          - positive_values
+
+sources:
+  - name: raw_data
+    description: "Dữ liệu nguồn từ PostgreSQL"
+    tables:
+      - name: customers
+        description: "Thông tin khách hàng"
+        columns:
+          - name: customer_id
+            tests:
+              - unique
+              - not_null
+      - name: orders
+        description: "Thông tin đơn hàng"
+        columns:
+          - name: order_id
+            tests:
+              - unique
+              - not_null
+          - name: customer_id
+            tests:
+              - relationships:
+                  to: ref('customers')
+                  field: customer_id
